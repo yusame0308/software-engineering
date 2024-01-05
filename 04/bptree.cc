@@ -85,6 +85,18 @@ alloc_leaf(NODE *parent)
 	return node;
 }
 
+NODE *
+alloc_node(NODE *parent)
+{
+	NODE *node;
+	if (!(node = (NODE *)calloc(1, sizeof(NODE)))) ERR;
+	node->isLeaf = false;
+	node->parent = parent;
+	node->nkey = 0;
+
+	return node;
+}
+
 // NODEを新しいTEMPにコピーする
 TEMP *
 create_temp_from_node(NODE *node)
@@ -95,13 +107,14 @@ create_temp_from_node(NODE *node)
 		temp->chi[i] = node->chi[i];
 		temp->key[i] = node->key[i];
 	}
+	temp->chi[node->nkey] = node->chi[node->nkey];
 	temp->nkey = node->nkey;
 	return temp;
 }
 
-// TEMPの空いている所に(key,data)を挿入する
+// LeafとしてのTEMP(元々chiに空きがある)にchild(key,data)を挿入する
 TEMP *
-insert_in_temp(TEMP *leaf, int key, DATA *data)
+insert_child_in_leaf_temp(TEMP *leaf, int key, DATA *data)
 {
 	int i;
 	if (key < leaf->key[0]) {
@@ -129,7 +142,38 @@ insert_in_temp(TEMP *leaf, int key, DATA *data)
 	return leaf;
 }
 
-// NODEのkeyとchiを空にする
+// NODEとしてのTEMP(元々chiに空きがない)にchild(key,node)を挿入する
+TEMP *
+insert_child_in_temp(TEMP *parent, int key, NODE *node)
+{
+	int i;
+	if (key < parent->key[0]) {
+		for (i = parent->nkey; i > 0; i--) {
+			parent->chi[i+1] = parent->chi[i] ;
+			parent->key[i] = parent->key[i-1] ;
+		} 
+		parent->key[0] = key;
+		parent->chi[1] = node;
+	}
+	else {
+		for (i = 0; i < parent->nkey; i++) {
+			if (key < parent->key[i]) break;
+		}
+		for (int j = parent->nkey; j > i; j--) {		
+			parent->chi[j+1] = parent->chi[j] ;
+			parent->key[j] = parent->key[j-1] ;
+		}
+
+		parent->key[i] = key;
+		parent->chi[i+1] = node;
+	}
+
+	parent->nkey++;
+
+	return parent;
+}
+
+// NODEのkeyとchildを空にする
 void
 clean_up_node(NODE *node)
 {
@@ -142,6 +186,7 @@ clean_up_node(NODE *node)
 	node->nkey = 0;
 }
 
+// TEMPを2つのLeafに分割する
 void
 copy_to_two_leaves(TEMP *temp, NODE *left, NODE *right)
 {
@@ -160,43 +205,68 @@ copy_to_two_leaves(TEMP *temp, NODE *left, NODE *right)
 	right->nkey = temp->nkey - middle;
 }
 
+// TEMPを2つのNODEに分割する
+void
+copy_to_two_nodes(TEMP *temp, NODE *left, NODE *right)
+{
+	int middle = (N+1)/2;
+	// rightは1番左が親に行く
+	for (int i = 0; i < temp->nkey-1; i++) {
+		if (i < middle) {
+			left->key[i] = temp->key[i];
+		}
+		else {
+			right->key[i-middle] = temp->key[i+1];
+		}
+	}
+	for (int i = 0; i < temp->nkey+1; i++) {
+		if (i < middle+1) {
+			left->chi[i] = temp->chi[i];
+		}
+		else {
+			right->chi[i-middle-1] = temp->chi[i];
+		}
+	}
+	left->nkey = middle;
+	right->nkey = temp->nkey - middle - 1;
+}
+
+// parentの空いている所にchild(key,node)を挿入する
 NODE *
-insert_node_in_leaf(NODE *leaf, int key, NODE *node)
+insert_child_in_parent(NODE *parent, int key, NODE *node)
 {
 	int i;
-	if (key < leaf->key[0]) {
-		for (i = leaf->nkey; i > 0; i--) {
-			leaf->chi[i+1] = leaf->chi[i] ;
-			leaf->key[i] = leaf->key[i-1] ;
+	if (key < parent->key[0]) {
+		for (i = parent->nkey; i > 0; i--) {
+			parent->chi[i+1] = parent->chi[i] ;
+			parent->key[i] = parent->key[i-1] ;
 		} 
-		leaf->key[0] = key;
-		leaf->chi[1] = node;
+		parent->key[0] = key;
+		parent->chi[1] = node;
 	}
 	else {
-		for (i = 0; i < leaf->nkey; i++) {
-			if (key < leaf->key[i]) break;
+		for (i = 0; i < parent->nkey; i++) {
+			if (key < parent->key[i]) break;
 		}
-		for (int j = leaf->nkey; j > i; j--) {		
-			leaf->chi[j+1] = leaf->chi[j] ;
-			leaf->key[j] = leaf->key[j-1] ;
+		for (int j = parent->nkey; j > i; j--) {		
+			parent->chi[j+1] = parent->chi[j] ;
+			parent->key[j] = parent->key[j-1] ;
 		}
 
-		leaf->key[i] = key;
-		leaf->chi[i+1] = node;
+		parent->key[i] = key;
+		parent->chi[i+1] = node;
 	}
 
-	leaf->nkey++;
+	parent->nkey++;
 
-	return leaf;
+	return parent;
 }
 
 void
-insert_in_parent(NODE *left, NODE *right)
+insert_in_parent(NODE *left, int key, NODE *right)
 {
-	int key = right->key[0];
-
 	if (left == Root) {
-		NODE *parent = alloc_leaf(NULL);
+		NODE *parent = alloc_node(NULL);
 		parent->key[0] = key;
 		parent->nkey = 1;
 		parent->chi[0] = left;
@@ -212,10 +282,21 @@ insert_in_parent(NODE *left, NODE *right)
 	NODE *parent = left->parent;
 
 	if (parent->nkey < N-1) {
-		insert_node_in_leaf(parent, key, right);
+		insert_child_in_parent(parent, key, right);
 	}
 	else {
 		// TODO: Parentが埋まっている時の処理
+		TEMP *temp = create_temp_from_node(parent);
+
+		insert_child_in_temp(temp, key, right);
+
+		clean_up_node(parent);
+
+		NODE *parent_right = alloc_node(parent->parent);
+
+		copy_to_two_nodes(temp, parent, parent_right);
+
+        return insert_in_parent(parent, temp->key[(N+1)/2], parent_right);
 	}
 }
 
@@ -237,11 +318,11 @@ insert(int key, DATA *data)
 	else { // split
 		// future work
 		TEMP *temp = create_temp_from_node(leaf);
-		insert_in_temp(temp, key, data);
+		insert_child_in_leaf_temp(temp, key, data);
 		NODE *next = alloc_leaf(leaf->parent);
 		clean_up_node(leaf);
 		copy_to_two_leaves(temp, leaf, next);
-		insert_in_parent(leaf, next);
+		insert_in_parent(leaf, next->key[0], next);
 	}
 }
 
